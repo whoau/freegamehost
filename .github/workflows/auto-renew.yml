@@ -1,0 +1,44 @@
+name: Auto Extend FreeGameHost
+
+on:
+  schedule:
+    - cron: "0 */8 * * *"  # 每8小时跑一次
+  workflow_dispatch: {}     # 手动触发
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run renew script
+        env:
+          FG_LOGIN_METHOD: ${{ secrets.FG_LOGIN_METHOD }}   # COOKIE 或 EMAIL
+          FG_COOKIE: ${{ secrets.FG_COOKIE }}               # COOKIE模式需要
+          FG_COOKIE_DOMAIN: panel.freegamehost.xyz
+          FG_EMAIL: ${{ secrets.FG_EMAIL }}                 # EMAIL模式需要
+          FG_PASSWORD: ${{ secrets.FG_PASSWORD }}           # EMAIL模式需要
+          FG_SERVER_KEYWORD: ${{ secrets.FG_SERVER_KEYWORD }}  # 可选，如 "test"
+          FG_BASE_URL: https://panel.freegamehost.xyz
+          HEADLESS: "true"
+          TIMEOUT_MS: "30000"
+        run: |
+          python renew_freegamehost.py
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots
