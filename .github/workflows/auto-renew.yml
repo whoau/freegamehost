@@ -2,8 +2,8 @@ name: Auto Extend FreeGameHost
 
 on:
   schedule:
-    - cron: "0 */8 * * *"  # 每8小时跑一次
-  workflow_dispatch: {}     # 手动触发
+    - cron: "0 */8 * * *"   # 每 8 小时运行一次
+  workflow_dispatch: {}     # 允许手动触发
 
 jobs:
   run:
@@ -17,18 +17,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install Playwright + Chromium
         run: |
           pip install playwright
           playwright install --with-deps chromium
 
       - name: Run renew script
         env:
-          FG_LOGIN_METHOD: ${{ secrets.FG_LOGIN_METHOD }}   # COOKIE 或 EMAIL
-          FG_COOKIE: ${{ secrets.FG_COOKIE }}               # COOKIE模式需要
+          # AUTO: 先尝试 COOKIE，失败后自动用 EMAIL（默认）
+          FG_LOGIN_METHOD: ${{ secrets.FG_LOGIN_METHOD || 'AUTO' }}
+          FG_COOKIE: ${{ secrets.FG_COOKIE }}               # 可选（AUTO/COOKIE 时用）
           FG_COOKIE_DOMAIN: panel.freegamehost.xyz
-          FG_EMAIL: ${{ secrets.FG_EMAIL }}                 # EMAIL模式需要
-          FG_PASSWORD: ${{ secrets.FG_PASSWORD }}           # EMAIL模式需要
+          FG_EMAIL: ${{ secrets.FG_EMAIL }}                 # 可选（AUTO/EMAIL 时用）
+          FG_PASSWORD: ${{ secrets.FG_PASSWORD }}           # 可选（AUTO/EMAIL 时用）
           FG_SERVER_KEYWORD: ${{ secrets.FG_SERVER_KEYWORD }}  # 可选，如 "test"
           FG_BASE_URL: https://panel.freegamehost.xyz
           HEADLESS: "true"
