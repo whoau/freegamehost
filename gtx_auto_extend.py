@@ -14,13 +14,19 @@ try:
 except Exception:
     pyotp = None
 
+from datetime import datetime, timezone
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:
+    ZoneInfo = None
+
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-def now():
-    return time.strftime("%Y-%m-%d_%H-%M-%S")
+def now_str():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+    print(f"[{now_str()}] {msg}", flush=True)
 
 DEBUG = os.getenv("GTX_DEBUG", "0") == "1"
 ART_DIR = Path(".artifacts")
@@ -30,7 +36,7 @@ def dump_debug(page, tag):
         return
     try:
         ART_DIR.mkdir(parents=True, exist_ok=True)
-        ts = now()
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
         png = ART_DIR / f"{ts}_{tag}.png"
         html = ART_DIR / f"{ts}_{tag}.html"
         try:
@@ -45,6 +51,144 @@ def dump_debug(page, tag):
     except Exception:
         pass
 
+# ====== Markdown 状态写入相关 ======
+MARK_LAST_BEGIN = "<!-- AUTO-EXTEND-LAST-SUCCESS -->"
+MARK_LAST_END = "<!-- AUTO-EXTEND-LAST-SUCCESS END -->"
+MARK_LOG_BEGIN = "<!-- AUTO-EXTEND-LOG -->"
+MARK_LOG_END = "<!-- AUTO-EXTEND-LOG END -->"
+
+def get_times(tzname: str):
+    # 返回 (本地时区字符串, UTC 字符串, tzname)
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    if ZoneInfo:
+        try:
+            tz = ZoneInfo(tzname)
+        except Exception:
+            tz = timezone.utc
+            tzname = "UTC"
+    else:
+        tz = timezone.utc
+        tzname = "UTC"
+    local = now_utc.astimezone(tz).replace(microsecond=0)
+    def fmt(dt):
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return fmt(local), fmt(now_utc), tzname
+
+def ensure_md_initialized(md_path: Path):
+    base = f"""# GTXGaming 自动续期状态
+
+最后一次续期成功:
+{MARK_LAST_BEGIN}
+暂无
+{MARK_LAST_END}
+
+历史记录:
+{MARK_LOG_BEGIN}
+{MARK_LOG_END}
+"""
+    if not md_path.exists():
+        md_path.write_text(base, encoding="utf-8")
+        return
+    txt = md_path.read_text(encoding="utf-8")
+    need_write = False
+    if MARK_LAST_BEGIN not in txt or MARK_LAST_END not in txt:
+        need_write = True
+    if MARK_LOG_BEGIN not in txt or MARK_LOG_END not in txt:
+        need_write = True
+    if need_write:
+        # 简单覆盖为标准结构，同时保留原文于历史记录下方
+        preserved = txt.strip()
+        content = base
+        if preserved:
+            content += f"\n> 旧内容备份（初始化时保留）：\n\n```\n{preserved}\n```\n"
+        md_path.write_text(content, encoding="utf-8")
+
+def _replace_between(txt: str, begin: str, end: str, repl: str):
+    import re as _re
+    pattern = _re.compile(re.escape(begin) + r".*?" + re.escape(end), _re.S)
+    return pattern.sub(begin + "\n" + repl + "\n" + end, txt, count=1)
+
+def update_status_md(md_file: str, status: str, tzname: str, extra: Optional[str] = None):
+    """
+    status: extended / already / unknown / captcha
+    """
+    path = Path(md_file)
+    ensure_md_initialized(path)
+    last_local, last_utc, tzname = get_times(tzname)
+    repo = os.getenv("GITHUB_REPOSITORY", "")
+    run_id = os.getenv("GITHUB_RUN_ID", "")
+    gh_server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
+    run_url = f"{gh_server}/{repo}/actions/runs/{run_id}" if repo and run_id else ""
+    server_url = os.getenv("GTX_SERVER_URL", "")
+    server_name = os.getenv("GTX_SERVER_NAME", "")
+    server_index = os.getenv("GTX_SERVER_INDEX", "0")
+
+    if status == "extended":
+        status_label = "✅ 续期成功"
+    elif status == "already":
+        status_label = "ℹ️ 今日已续过"
+    elif status == "captcha":
+        status_label = "⛔ 验证码/安全校验拦截"
+    else:
+        status_label = "⚠️ 结果未确认"
+
+    server_info = server_url or (server_name or f"index={server_index}")
+    entry_lines = [
+        f"- {status_label}",
+        f"  - 时间：{last_local} ({tzname}) | {last_utc} (UTC)",
+    ]
+    if server_info:
+        entry_lines.append(f"  - 服务器：{server_info}")
+    if run_url:
+        entry_lines.append(f"  - 运行：{run_url}")
+    if extra:
+        entry_lines.append(f"  - 备注：{extra}")
+    entry = "\n".join(entry_lines)
+
+    txt = path.read_text(encoding="utf-8")
+
+    # 历史记录：总是把本次条目插到最前
+    old_log_block = ""
+    i1 = txt.find(MARK_LOG_BEGIN)
+    i2 = txt.find(MARK_LOG_END)
+    if i1 != -1 and i2 != -1 and i2 > i1:
+        old_log_block = txt[i1 + len(MARK_LOG_BEGIN):i2].strip()
+    new_log = (entry + ("\n" + old_log_block if old_log_block else "")).strip()
+
+    txt = _replace_between(txt, MARK_LOG_BEGIN, MARK_LOG_END, new_log)
+
+    # “最后一次续期成功”：仅在 success 时更新
+    if status == "extended":
+        last_block = f"{last_local} ({tzname}) | {last_utc} (UTC)"
+        txt = _replace_between(txt, MARK_LAST_BEGIN, MARK_LAST_END, last_block)
+
+    path.write_text(txt, encoding="utf-8")
+    log(f"已写入状态到 {md_file}")
+
+def append_job_summary(status: str, tzname: str):
+    if os.getenv("GTX_WRITE_SUMMARY", "1") != "1":
+        return
+    summary = os.getenv("GITHUB_STEP_SUMMARY")
+    if not summary:
+        return
+    local, utc, tzname = get_times(tzname)
+    title = "✅ 续期成功" if status == "extended" else (
+        "ℹ️ 今日已续过" if status == "already" else "⚠️ 结果未确认"
+    )
+    lines = [
+        f"## {title}",
+        f"- 时间：{local} ({tzname}) | {utc} (UTC)",
+    ]
+    server_url = os.getenv("GTX_SERVER_URL", "")
+    server_name = os.getenv("GTX_SERVER_NAME", "")
+    server_index = os.getenv("GTX_SERVER_INDEX", "0")
+    server_info = server_url or (server_name or f"index={server_index}")
+    if server_info:
+        lines.append(f"- 服务器：{server_info}")
+    with open(summary, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+# ====== 登录/续期逻辑（与之前相同，略有增强） ======
 def load_cookies_file(path: Path) -> List[dict]:
     if path.exists():
         try:
@@ -75,7 +219,6 @@ def parse_cookie_header(header: str, domain: str) -> List[dict]:
     return cookies
 
 def seed_cookies_from_env(domain_default: str) -> List[dict]:
-    """从环境变量 GTX_COOKIE_HEADER 或 GTX_COOKIES_B64 预置 cookies"""
     cookies = []
     hdr = os.getenv("GTX_COOKIE_HEADER", "").strip()
     b64 = os.getenv("GTX_COOKIES_B64", "").strip()
@@ -135,7 +278,6 @@ def find_and_fill(page, selectors: list, value: str) -> bool:
     return False
 
 def try_submit(page) -> bool:
-    # 常见提交方式
     tries = [
         'button[type="submit"]',
         'input[type="submit"]',
@@ -146,7 +288,6 @@ def try_submit(page) -> bool:
             return True
         except Exception:
             pass
-    # 按文案
     for label in ["login", "sign in", "verify", "continue", "确认", "登录", "提交"]:
         try:
             page.get_by_role("button", name=re.compile(label, re.I)).click(timeout=1500)
@@ -158,7 +299,6 @@ def try_submit(page) -> bool:
             return True
         except Exception:
             pass
-    # 回车
     try:
         page.keyboard.press("Enter")
         return True
@@ -166,7 +306,6 @@ def try_submit(page) -> bool:
         return False
 
 def detect_2fa(page) -> bool:
-    # 粗略检查 2FA/TOTP 输入框或提示文案
     candidates = [
         'input[name="totp"]', '#totp', 'input[name*="otp"]', 'input[name*="2fa"]',
         'input[name*="token"]', 'input[name*="code"]',
@@ -186,7 +325,7 @@ def detect_2fa(page) -> bool:
 
 def handle_2fa(page, totp_secret: Optional[str]) -> bool:
     if not detect_2fa(page):
-        return True  # 无 2FA
+        return True
     if not totp_secret:
         log("检测到两步验证页面，但未提供 GTX_TOTP_SECRET，无法继续自动登录。")
         return False
@@ -195,7 +334,6 @@ def handle_2fa(page, totp_secret: Optional[str]) -> bool:
         return False
     try:
         code = pyotp.TOTP(totp_secret.replace(" ", "")).now()
-        # 填入可能的输入框
         candidates = [
             'input[name="totp"]', '#totp', 'input[name*="otp"]', 'input[name*="2fa"]',
             'input[name*="token"]', 'input[name*="code"]',
@@ -213,9 +351,6 @@ def handle_2fa(page, totp_secret: Optional[str]) -> bool:
         return False
 
 def ensure_login(page, base_url: str, login_path: str, email: Optional[str], password: Optional[str], totp_secret: Optional[str]) -> str:
-    """
-    返回状态：ok / captcha / fail
-    """
     page.goto(f"{base_url}{login_path}", wait_until="domcontentloaded")
     dump_debug(page, "login-page")
     if login_path not in page.url:
@@ -250,7 +385,6 @@ def ensure_login(page, base_url: str, login_path: str, email: Optional[str], pas
         dump_debug(page, "captcha-after-submit")
         return "captcha"
 
-    # 两步验证
     if detect_2fa(page):
         log("检测到两步验证页面，尝试输入 TOTP 验证码...")
         if not handle_2fa(page, totp_secret):
@@ -262,10 +396,8 @@ def ensure_login(page, base_url: str, login_path: str, email: Optional[str], pas
             pass
 
     if login_path in page.url:
-        # 仍在登录页，提取错误提示
         content = page.content()
         dump_debug(page, "login-still-on-page")
-        # 如果是安全/验证码，不当作密码错误
         if re.search(r"captcha|security|verify you are human|cloudflare", content, re.I):
             log("被安全校验拦截（非账号错误）。")
             return "captcha"
@@ -288,7 +420,6 @@ def goto_server_manage(page, base_url: str, server_url: Optional[str], server_na
 
     page.goto(f"{base_url}/", wait_until="domcontentloaded")
     dump_debug(page, "dashboard")
-    # 直接找“Manage Server”
     try:
         link = page.get_by_role("link", name=re.compile(r"Manage\s*Server", re.I)).nth(server_index)
         link.wait_for(state="visible", timeout=8000)
@@ -331,9 +462,6 @@ def goto_server_manage(page, base_url: str, server_url: Optional[str], server_na
     return False
 
 def click_extend(page) -> str:
-    """
-    返回：extended / already / unknown
-    """
     patterns = [
         re.compile(r"EXTEND\s*72\s*HOUR", re.I),
         re.compile(r"EXTEND\s*72", re.I),
@@ -380,7 +508,6 @@ def click_extend(page) -> str:
         dump_debug(page, "extend-click-failed")
         return "unknown"
 
-    # 可能有确认弹窗
     time.sleep(1)
     for label in ["Yes", "Confirm", "OK", "确定", "是"]:
         try:
@@ -389,10 +516,7 @@ def click_extend(page) -> str:
         except Exception:
             pass
 
-    # 等待提示
-    success_keys = [
-        r"\bextended\b", r"success", r"已续期", r"已延长", r"72", r"小时"
-    ]
+    success_keys = [r"\bextended\b", r"success", r"已续期", r"已延长", r"72", r"小时"]
     already_keys = [
         r"already\s*extended", r"once\s*per\s*day", r"已续过", r"每天只能续期一次",
         r"You have already extended\s*your.*server today",
@@ -441,18 +565,18 @@ def main():
     password = os.getenv("GTX_PASSWORD")
     totp_secret = os.getenv("GTX_TOTP_SECRET")  # 可选：两步验证 TOTP Base32
     cookie_path = Path(os.getenv("GTX_COOKIE_PATH", ".cache/cookies.json"))
-    server_url = os.getenv("GTX_SERVER_URL")  # 可选：指定具体服务器管理页
-    server_name = os.getenv("GTX_SERVER_NAME")  # 可选：按名称匹配
+    server_url = os.getenv("GTX_SERVER_URL")
+    server_name = os.getenv("GTX_SERVER_NAME")
     server_index = int(os.getenv("GTX_SERVER_INDEX", "0"))
     headless = os.getenv("GTX_HEADLESS", "1") != "0"
     timeout_ms = int(os.getenv("GTX_TIMEOUT_MS", "40000"))
+    status_md = os.getenv("GTX_STATUS_MD", "EXTEND_STATUS.md")
+    tzname = os.getenv("GTX_TZ", "Asia/Shanghai")
 
     log(f"目标面板：{base_url}{login_path}")
 
-    # 预加载 cookies（缓存文件 + 环境变量）
     cookies = load_cookies_file(cookie_path)
     seeded = seed_cookies_from_env(domain_default="gamepanel2.gtxgaming.co.uk")
-    # 去重合并
     def key(c): return (c.get("domain",""), c.get("path","/"), c.get("name",""))
     merged = { key(c): c for c in cookies }
     for c in seeded:
@@ -482,7 +606,6 @@ def main():
 
         page = context.new_page()
 
-        # 登录
         status = ensure_login(page, base_url, login_path, email, password, totp_secret)
         if status == "fail":
             log("登录失败。")
@@ -490,26 +613,29 @@ def main():
             context.close(); browser.close()
             sys.exit(2)
         if status == "captcha":
-            log("因验证码/安全校验无法自动登录。本次不视为错误（退出 0）。建议设置 GTX_COOKIE_HEADER 或手动跑一次缓存 cookies。")
+            log("因验证码/安全校验无法自动登录。本次不视为错误（退出 0）。")
             dump_debug(page, "login-captcha")
-            # 也尝试保存当前 cookies（若有）
             try:
                 latest = context.cookies()
                 if latest:
                     save_cookies(cookie_path, latest)
             except Exception:
                 pass
+            # 记录到历史（标记为 captcha），但不更新“最后一次成功”
+            try:
+                update_status_md(os.getenv("GTX_STATUS_MD", "EXTEND_STATUS.md"), "captcha", tzname)
+                append_job_summary("unknown", tzname)
+            except Exception as e:
+                log(f"写入状态失败（captcha）：{e}")
             context.close(); browser.close()
             sys.exit(0)
 
-        # 进入服务器管理页
         if not goto_server_manage(page, base_url, server_url, server_name, server_index):
             log("未能进入服务器管理页。")
             dump_debug(page, "server-enter-fail")
             context.close(); browser.close()
             sys.exit(2)
 
-        # 点击续期
         status = click_extend(page)
         if status == "extended":
             log("续期成功 ✅")
@@ -519,9 +645,19 @@ def main():
             rc = 0
         else:
             log("未能确认续期是否成功，可能页面结构变化或需要人工确认。")
-            rc = 0  # 默认不标红；如需严格失败将此改为 2
+            rc = 0  # 如需严格失败可改为 2
 
-        # 保存 cookies（减少后续登录）
+        # 写入 Markdown + Summary
+        try:
+            update_status_md(status_md, status, tzname)
+        except Exception as e:
+            log(f"写入 Markdown 失败：{e}")
+        try:
+            append_job_summary(status, tzname)
+        except Exception as e:
+            log(f"写入 Job Summary 失败：{e}")
+
+        # 保存 cookies
         try:
             latest = context.cookies()
             if latest:
@@ -539,9 +675,4 @@ if __name__ == "__main__":
     except Exception as e:
         log(f"未捕获异常：{e}")
         traceback.print_exc()
-        if DEBUG:
-            try:
-                ART_DIR.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
         sys.exit(2)
