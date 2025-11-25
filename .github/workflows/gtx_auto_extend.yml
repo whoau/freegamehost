@@ -30,25 +30,32 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Playwright
+      - name: Install Playwright + deps
         run: |
           python -m pip install --upgrade pip
-          pip install playwright
+          pip install playwright pyotp
           playwright install --with-deps chromium
 
       - name: Run auto extend
         env:
           GTX_EMAIL: ${{ secrets.GTX_EMAIL }}
           GTX_PASSWORD: ${{ secrets.GTX_PASSWORD }}
+          GTX_TOTP_SECRET: ${{ secrets.GTX_TOTP_SECRET }}          # 可选：两步验证 TOTP 秘钥（Base32）
           GTX_BASE_URL: https://gamepanel2.gtxgaming.co.uk
+          GTX_LOGIN_PATH: /auth/login
           GTX_COOKIE_PATH: .cache/cookies.json
-          GTX_SERVER_INDEX: "0"      # 如有多个服务器可改索引
-          GTX_HEADLESS: "1"          # 如需可视化调试可设为 0
-          # GTX_SERVER_URL: ""       # 可选：若有固定的服务器管理页 URL，填上最稳
-          # GTX_SERVER_NAME: ""      # 可选：按名称寻找服务器
-          GTX_TIMEOUT_MS: "40000"
+          GTX_SERVER_URL: ${{ vars.GTX_SERVER_URL }}               # 可选：直接写服务器管理页完整 URL（推荐）
+          GTX_SERVER_NAME: ${{ vars.GTX_SERVER_NAME }}             # 可选：按名称匹配
+          GTX_SERVER_INDEX: ${{ vars.GTX_SERVER_INDEX || '0' }}    # 多服务器时的索引
+          GTX_HEADLESS: "1"                                        # 调试时可改为 "0"
+          GTX_TIMEOUT_MS: "45000"
+          GTX_DEBUG: ${{ vars.GTX_DEBUG || '0' }}                  # 设为 "1" 开启截图/HTML
+          # 以下为可选的 Cookie 预置（遇到验证码时建议配置其一）
+          GTX_COOKIE_HEADER: ${{ secrets.GTX_COOKIE_HEADER }}      # 浏览器里复制的 Cookie 请求头整串
+          GTX_COOKIES_B64: ${{ secrets.GTX_COOKIES_B64 }}          # Base64 的 cookies.json
+          GTX_COOKIE_DOMAIN: gamepanel2.gtxgaming.co.uk
         run: |
-          mkdir -p .cache
+          mkdir -p .cache .artifacts
           python gtx_auto_extend.py
 
       - name: Save cookies cache
@@ -57,3 +64,11 @@ jobs:
         with:
           path: .cache/cookies.json
           key: gtx-cookies-v1-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gtx-debug
+          path: .artifacts
+          if-no-files-found: ignore
