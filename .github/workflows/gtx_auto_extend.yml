@@ -1,0 +1,59 @@
+name: GTXGaming Auto Extend
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "10 2 * * *"  # 每天 02:10 UTC 运行，按需修改
+
+concurrency:
+  group: gtxgaming-extend-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore cookies cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/cookies.json
+          key: gtx-cookies-v1-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            gtx-cookies-v1-${{ runner.os }}-
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run auto extend
+        env:
+          GTX_EMAIL: ${{ secrets.GTX_EMAIL }}
+          GTX_PASSWORD: ${{ secrets.GTX_PASSWORD }}
+          GTX_BASE_URL: https://gamepanel2.gtxgaming.co.uk
+          GTX_COOKIE_PATH: .cache/cookies.json
+          GTX_SERVER_INDEX: "0"      # 如有多个服务器可改索引
+          GTX_HEADLESS: "1"          # 如需可视化调试可设为 0
+          # GTX_SERVER_URL: ""       # 可选：若有固定的服务器管理页 URL，填上最稳
+          # GTX_SERVER_NAME: ""      # 可选：按名称寻找服务器
+          GTX_TIMEOUT_MS: "40000"
+        run: |
+          mkdir -p .cache
+          python gtx_auto_extend.py
+
+      - name: Save cookies cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/cookies.json
+          key: gtx-cookies-v1-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
