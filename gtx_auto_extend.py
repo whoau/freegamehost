@@ -262,3 +262,286 @@ def ensure_login(page, base_url: str, login_path: str, email: Optional[str], pas
             pass
 
     if login_path in page.url:
+        # 仍在登录页，提取错误提示
+        content = page.content()
+        dump_debug(page, "login-still-on-page")
+        # 如果是安全/验证码，不当作密码错误
+        if re.search(r"captcha|security|verify you are human|cloudflare", content, re.I):
+            log("被安全校验拦截（非账号错误）。")
+            return "captcha"
+        if re.search(r"invalid|incorrect|错误|不正确|失败", content, re.I):
+            log("登录失败：账号或密码可能不正确，或被安全页拦截。")
+        else:
+            log("登录未成功，仍停留在登录页。")
+        return "fail"
+
+    log("登录成功。")
+    dump_debug(page, "login-success")
+    return "ok"
+
+def goto_server_manage(page, base_url: str, server_url: Optional[str], server_name: Optional[str], server_index: int) -> bool:
+    if server_url:
+        log(f"跳转到指定服务器页面：{server_url}")
+        page.goto(server_url, wait_until="domcontentloaded")
+        dump_debug(page, "server-page")
+        return True
+
+    page.goto(f"{base_url}/", wait_until="domcontentloaded")
+    dump_debug(page, "dashboard")
+    # 直接找“Manage Server”
+    try:
+        link = page.get_by_role("link", name=re.compile(r"Manage\s*Server", re.I)).nth(server_index)
+        link.wait_for(state="visible", timeout=8000)
+        link.click()
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
+        dump_debug(page, "server-page")
+        log("已进入服务器管理页（通过 Manage Server 按钮）。")
+        return True
+    except Exception:
+        pass
+
+    if server_name:
+        try:
+            card = page.locator(f"text=/{re.escape(server_name)}/i").first
+            card.wait_for(state="visible", timeout=8000)
+            try:
+                card.get_by_role("link", name=re.compile(r"Manage", re.I)).click(timeout=3000)
+            except Exception:
+                card.locator('a:has-text("Manage")').first.click(timeout=3000)
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+            dump_debug(page, "server-page")
+            log(f"已进入服务器管理页（匹配服务器名 {server_name}）。")
+            return True
+        except Exception:
+            pass
+
+    try:
+        a = page.locator('a[href*="/server/"]').nth(server_index)
+        a.wait_for(state="visible", timeout=8000)
+        a.click()
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
+        dump_debug(page, "server-page")
+        log("已进入服务器管理页（通过 /server/ 链接）。")
+        return True
+    except Exception:
+        pass
+
+    log("未能定位到服务器管理页入口（Manage Server）。")
+    dump_debug(page, "server-not-found")
+    return False
+
+def click_extend(page) -> str:
+    """
+    返回：extended / already / unknown
+    """
+    patterns = [
+        re.compile(r"EXTEND\s*72\s*HOUR", re.I),
+        re.compile(r"EXTEND\s*72", re.I),
+        re.compile(r"EXTEND.*72", re.I),
+    ]
+
+    btn = None
+    for pat in patterns:
+        try:
+            btn = page.get_by_role("button", name=pat)
+            btn.wait_for(state="visible", timeout=5000)
+            break
+        except Exception:
+            try:
+                btn = page.get_by_role("link", name=pat)
+                btn.wait_for(state="visible", timeout=5000)
+                break
+            except Exception:
+                pass
+        try:
+            btn = page.get_by_text(pat)
+            btn.wait_for(state="visible", timeout=5000)
+            break
+        except Exception:
+            pass
+
+    if not btn:
+        try:
+            btn = page.locator('text=/EXTEND\\s*72\\s*HOUR/i').first
+            btn.wait_for(state="visible", timeout=5000)
+        except Exception:
+            pass
+
+    if not btn:
+        log('未找到 "EXTEND 72 HOUR(S)" 按钮，页面可能变化。')
+        dump_debug(page, "extend-button-missing")
+        return "unknown"
+
+    log('点击 "EXTEND 72 HOUR(S)"...')
+    try:
+        btn.click(timeout=5000)
+    except Exception as e:
+        log(f"点击失败：{e}")
+        dump_debug(page, "extend-click-failed")
+        return "unknown"
+
+    # 可能有确认弹窗
+    time.sleep(1)
+    for label in ["Yes", "Confirm", "OK", "确定", "是"]:
+        try:
+            page.get_by_role("button", name=re.compile(label, re.I)).click(timeout=1500)
+            break
+        except Exception:
+            pass
+
+    # 等待提示
+    success_keys = [
+        r"\bextended\b", r"success", r"已续期", r"已延长", r"72", r"小时"
+    ]
+    already_keys = [
+        r"already\s*extended", r"once\s*per\s*day", r"已续过", r"每天只能续期一次",
+        r"You have already extended\s*your.*server today",
+    ]
+    text = ""
+    for _ in range(20):
+        time.sleep(0.5)
+        try:
+            potential = page.locator('.alert, [role="alert"], .toast, .swal2-popup, .modal, .message, .notification')
+            count = potential.count()
+            if count > 0:
+                texts = []
+                for i in range(min(count, 8)):
+                    try:
+                        t = potential.nth(i).inner_text(timeout=400)
+                        if t:
+                            texts.append(t.strip())
+                    except Exception:
+                        pass
+                text = "\n".join(texts)
+                if text:
+                    break
+        except Exception:
+            pass
+
+    body_text = ""
+    try:
+        body_text = page.inner_text("body")[:8000]
+    except Exception:
+        pass
+    combined = (text or "") + "\n" + (body_text or "")
+    if re.search("|".join(already_keys), combined, re.I):
+        dump_debug(page, "extend-already")
+        return "already"
+    if re.search("|".join(success_keys), combined, re.I):
+        dump_debug(page, "extend-success")
+        return "extended"
+
+    dump_debug(page, "extend-unknown")
+    return "unknown"
+
+def main():
+    base_url = os.getenv("GTX_BASE_URL", "https://gamepanel2.gtxgaming.co.uk").rstrip("/")
+    login_path = os.getenv("GTX_LOGIN_PATH", "/auth/login")
+    email = os.getenv("GTX_EMAIL")
+    password = os.getenv("GTX_PASSWORD")
+    totp_secret = os.getenv("GTX_TOTP_SECRET")  # 可选：两步验证 TOTP Base32
+    cookie_path = Path(os.getenv("GTX_COOKIE_PATH", ".cache/cookies.json"))
+    server_url = os.getenv("GTX_SERVER_URL")  # 可选：指定具体服务器管理页
+    server_name = os.getenv("GTX_SERVER_NAME")  # 可选：按名称匹配
+    server_index = int(os.getenv("GTX_SERVER_INDEX", "0"))
+    headless = os.getenv("GTX_HEADLESS", "1") != "0"
+    timeout_ms = int(os.getenv("GTX_TIMEOUT_MS", "40000"))
+
+    log(f"目标面板：{base_url}{login_path}")
+
+    # 预加载 cookies（缓存文件 + 环境变量）
+    cookies = load_cookies_file(cookie_path)
+    seeded = seed_cookies_from_env(domain_default="gamepanel2.gtxgaming.co.uk")
+    # 去重合并
+    def key(c): return (c.get("domain",""), c.get("path","/"), c.get("name",""))
+    merged = { key(c): c for c in cookies }
+    for c in seeded:
+        merged[key(c)] = c
+    cookies = list(merged.values())
+    if cookies:
+        log(f"准备导入 cookies（{len(cookies)} 条）")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-gpu",
+        ])
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            locale="en-US",
+        )
+        context.set_default_timeout(timeout_ms)
+
+        if cookies:
+            try:
+                context.add_cookies(cookies)
+                log("已导入 cookies（可能直接免登）")
+            except Exception as e:
+                log(f"导入 cookies 失败：{e}")
+
+        page = context.new_page()
+
+        # 登录
+        status = ensure_login(page, base_url, login_path, email, password, totp_secret)
+        if status == "fail":
+            log("登录失败。")
+            dump_debug(page, "login-fail")
+            context.close(); browser.close()
+            sys.exit(2)
+        if status == "captcha":
+            log("因验证码/安全校验无法自动登录。本次不视为错误（退出 0）。建议设置 GTX_COOKIE_HEADER 或手动跑一次缓存 cookies。")
+            dump_debug(page, "login-captcha")
+            # 也尝试保存当前 cookies（若有）
+            try:
+                latest = context.cookies()
+                if latest:
+                    save_cookies(cookie_path, latest)
+            except Exception:
+                pass
+            context.close(); browser.close()
+            sys.exit(0)
+
+        # 进入服务器管理页
+        if not goto_server_manage(page, base_url, server_url, server_name, server_index):
+            log("未能进入服务器管理页。")
+            dump_debug(page, "server-enter-fail")
+            context.close(); browser.close()
+            sys.exit(2)
+
+        # 点击续期
+        status = click_extend(page)
+        if status == "extended":
+            log("续期成功 ✅")
+            rc = 0
+        elif status == "already":
+            log("今天已经续过，跳过 ✅（不报错）")
+            rc = 0
+        else:
+            log("未能确认续期是否成功，可能页面结构变化或需要人工确认。")
+            rc = 0  # 默认不标红；如需严格失败将此改为 2
+
+        # 保存 cookies（减少后续登录）
+        try:
+            latest = context.cookies()
+            if latest:
+                save_cookies(cookie_path, latest)
+        except Exception as e:
+            log(f"保存 cookies 失败：{e}")
+
+        context.close()
+        browser.close()
+        sys.exit(rc)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log(f"未捕获异常：{e}")
+        traceback.print_exc()
+        if DEBUG:
+            try:
+                ART_DIR.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+        sys.exit(2)
