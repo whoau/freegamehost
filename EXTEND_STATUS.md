@@ -1,0 +1,14 @@
+# GTXGaming 自动续期状态
+
+最后一次续期成功:
+<!-- AUTO-EXTEND-LAST-SUCCESS -->
+暂无
+<!-- AUTO-EXTEND-LAST-SUCCESS END -->
+
+历史记录:
+<!-- AUTO-EXTEND-LOG -->
+- ⛔ 验证码/安全校验拦截
+  - 时间：2025-11-26 11:21:50 (Asia/Shanghai) | 2025-11-26 03:21:50 (UTC)
+  - 服务器：index=0
+  - 运行：https://github.com/whoau/gtxgaming/actions/runs/19691402072
+<!-- AUTO-EXTEND-LOG END -->
